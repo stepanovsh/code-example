@@ -1,2 +1,2 @@
-gode-example
+code-example
 ============
