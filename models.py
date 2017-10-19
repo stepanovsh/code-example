@@ -3,9 +3,12 @@ from __future__ import unicode_literals
 
 from django.db import models
 from django.conf import settings
+from django.apps import apps
 from django.utils.translation import ugettext as _
 from django.contrib.postgres.fields import JSONField
+from django.core.exceptions import ValidationError
 
+from ordered_model.models import OrderedModelBase
 from model_utils.models import TimeStampedModel
 from model_utils.choices import Choices
 
@@ -96,3 +99,81 @@ class Notification(TimeStampedModel):
         devices = DeviceModel.objects.filter(user=self.user)
         for device in devices:
             send_push.delay(device.arn, body, True)
+
+
+class Banner(OrderedModelBase):
+    """
+    Onboarding Banner Model
+    """
+
+    BANNER_SCREEN_CHOICES = Choices(
+        (1, 'SCREE1', _('Screen1'),),
+        (2, 'SCREE2', _('Screen2'),),
+        (3, 'SCREE3', _('Screen3'),),
+    )
+
+    BANNER_SCREEN_CHOICES_NEED_ID = {
+        BANNER_SCREEN_CHOICES.SCREE1: {
+            'external_info': False
+        },
+        BANNER_SCREEN_CHOICES.SCREE2: {
+            'external_info': True,
+            'app_path': 'application',
+            'model_name': 'Model1',
+            'serializer_path': 'application.serializers.Serializer1',
+        },
+        BANNER_SCREEN_CHOICES.SCREE3: {
+            'external_info': True,
+            'app_path': 'application',
+            'model_name': 'Model2',
+            'serializer_path': 'application.serializers.Serializer2',
+        },
+    }
+
+    image = models.ImageField(_('Image'), upload_to=photo_directory_path)
+    is_shown = models.BooleanField(_('is Show'), default=True)
+    screen = models.PositiveSmallIntegerField(_('Screen'), choices=BANNER_SCREEN_CHOICES, null=True, blank=True)
+    external_id = models.BigIntegerField(_('External object id'), null=True, blank=True)
+    ordering = models.PositiveIntegerField(editable=False, db_index=True)
+    order_field_name = 'ordering'
+
+    class Meta:
+        verbose_name = _('Banner')
+        verbose_name_plural = _('Banners')
+        ordering = ('ordering',)
+
+    def get_image_url(self, request=None):
+        if request is None or settings.USE_AWS_S3_FOR_MEDIA:
+            return self.image.url
+        return request.build_absolute_uri(self.image.url)
+
+    def clean(self):
+        if self.screen and self.BANNER_SCREEN_CHOICES_NEED_ID[self.screen]['external_info']:
+            external_model = apps.get_model(
+                self.BANNER_SCREEN_CHOICES_NEED_ID[self.screen]['app_path'],
+                self.BANNER_SCREEN_CHOICES_NEED_ID[self.screen]['model_name']
+            )
+            try:
+                external_model.objects.get(id=self.external_id)
+            except external_model.DoesNotExist:
+                raise ValidationError({
+                    'external_id': _('Object does not exist')
+                })
+        if (not self.screen and self.external_id) or \
+                (self.screen and self.BANNER_SCREEN_CHOICES_NEED_ID[self.screen]['external_info'] is False and
+                     self.external_id):
+            raise ValidationError({
+                'external_id': _('Please select correct screen')
+            })
+
+    def get_serializer(self):
+        path = self.BANNER_SCREEN_CHOICES_NEED_ID[self.screen]['serializer_path']
+        path = path.split('.')
+        if len(path) != 4:
+            return None
+        el = __import__(path[0])
+        path_index = 1
+        while path_index < 4 and hasattr(el, path[path_index]):
+            el = getattr(el, path[path_index], None)
+            path_index += 1
+        return el
